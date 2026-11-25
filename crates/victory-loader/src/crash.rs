@@ -402,6 +402,58 @@ fn clwb_loop(code: &[u8]) -> Option<ClwbLoop> {
     (limit != base).then_some(ClwbLoop { base, limit, len })
 }
 
+/// Where `code` has a [`clwb_loop`]: the offset of its `clwb` and that
+/// instruction's length (66, an optional REX, 0f ae, ModRM).
+fn clwb_loop_sites(code: &[u8]) -> Vec<(usize, usize)> {
+    (0..code.len())
+        .filter(|&at| code[at] == 0x66)
+        .filter_map(|at| {
+            clwb_loop(&code[at..(at + 32).min(code.len())])?;
+            Some((at, if matches!(code[at + 1], 0x40 | 0x41) { 5 } else { 4 }))
+        })
+        .collect()
+}
+
+/// Turns the `clwb` of every [`clwb_loop`] in the executable sections of
+/// the image mapped at `base` into a NOP of its length, and returns how
+/// many. Under Rosetta `clwb` faults and each loop costs an exception
+/// (~300 us through Wine): the world load ran ~15,000 a second on job
+/// threads and crawled (#135). The loop's `add`/`cmp`/`jbe` stay, so its
+/// registers end as before. Before any title thread runs.
+pub fn nop_clwb_loops(base: u64, info: &victory_pe::ImageInfo) -> usize {
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    const EXECUTE: u32 = 0x2000_0000;
+    let mut patched = 0;
+    for s in info.sections.iter().filter(|s| s.characteristics & EXECUTE != 0) {
+        let start = base + u64::from(s.rva);
+        let len = s.virtual_size.min(s.file_size) as usize;
+        // SAFETY: the mapped section, readable code.
+        let code = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
+        for (at, n) in clwb_loop_sites(code) {
+            const NOP4: [u8; 4] = [0x0f, 0x1f, 0x40, 0x00];
+            const NOP5: [u8; 5] = [0x0f, 0x1f, 0x44, 0x00, 0x00];
+            let site = (start + at as u64) as *mut u8;
+            let mut old = 0;
+            // SAFETY: the title's code, writable for the moment of the
+            // write, before any title thread runs.
+            unsafe {
+                if VirtualProtect(site.cast(), n, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+                    continue;
+                }
+                let nop: &[u8] = if n == 5 { &NOP5 } else { &NOP4 };
+                std::ptr::copy_nonoverlapping(nop.as_ptr(), site, n);
+                VirtualProtect(site.cast(), n, old, &mut old);
+            }
+            patched += 1;
+        }
+    }
+    // SAFETY: flushes the whole instruction cache of our process.
+    unsafe { FlushInstructionCache(GetCurrentProcess(), std::ptr::null(), 0) };
+    patched
+}
+
 /// `clzero` at `context.Rip`. An exception costs about a microsecond and
 /// titles clear tens of kilobytes at a time, a line per pass, so the two
 /// loops compilers build around the instruction are done whole in one
@@ -1284,6 +1336,24 @@ mod tests {
         // just the 4-byte `clwb` instruction and let the CPU run add/cmp/jbe.
         assert_eq!(run(0, u64::MAX - 10), (4, 0));
         assert_eq!(run(u64::MAX - 16, 0x100), (4, u64::MAX - 16));
+    }
+
+    #[test]
+    fn clwb_write_back_loops_are_found_for_nops() {
+        // The title's loop (#135), behind a lea and a lone clwb that is no loop.
+        let code = [
+            0x48, 0x8d, 0x44, 0x0a, 0xff, // lea rax, [rdx+rcx-1]
+            0x66, 0x0f, 0xae, 0x39, // clflushopt [rcx], no loop
+            0x66, 0x0f, 0xae, 0x31, // top: clwb [rcx]
+            0x48, 0x83, 0xc1, 0x40, //      add rcx, 0x40
+            0x48, 0x39, 0xc1, //            cmp rcx, rax
+            0x76, 0xf3, //                  jbe top
+            0xc3,
+        ];
+        assert_eq!(clwb_loop_sites(&code), vec![(9, 4)]);
+        // With REX.B: clwb [r9]; add r9, 0x40; cmp r9, rax.
+        let rex = [0x66, 0x41, 0x0f, 0xae, 0x31, 0x49, 0x83, 0xc1, 0x40, 0x49, 0x39, 0xc1, 0x76, 0xf2];
+        assert_eq!(clwb_loop_sites(&rex), vec![(0, 5)]);
     }
 
     #[test]

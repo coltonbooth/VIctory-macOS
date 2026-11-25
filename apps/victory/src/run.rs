@@ -89,6 +89,12 @@ pub fn run(
         image.base(),
         image.info().image_base
     );
+    // clwb faults under Rosetta, an exception per write-back loop (#135).
+    #[cfg(windows)]
+    println!(
+        "clwb loops     {} made NOPs",
+        victory_loader::nop_clwb_loops(image.base() as u64, image.info())
+    );
     // Masked stores redone as plain stores Rosetta can resume, so fault
     // tracking (`VICTORY_FAULT_TRACKING=1`) can run under Rosetta (#50).
     if let (Some(which), Some(original)) = (patching, original) {
