@@ -821,6 +821,10 @@ pub(crate) struct HostTexture {
     /// A host copy or resolve wrote it: its contents are the host's, not
     /// title memory's (`crate::texture`).
     pub(crate) host_written: std::sync::atomic::AtomicBool,
+    /// A list moved it to a GPU write state (render target, depth write,
+    /// unordered access): its flags alone do not say so, since a memory's
+    /// host texture takes the uses of every title texture there.
+    gpu_written: std::sync::atomic::AtomicBool,
     /// Its uploads from title memory (`crate::texture`), made on first use.
     pub(crate) staging: std::sync::Mutex<Option<std::sync::Arc<crate::texture::Staging>>>,
     /// A depth texture's writable twin (`crate::twin`), made with its first
@@ -861,6 +865,7 @@ impl HostTexture {
             state: state.into(),
             castable,
             host_written: false.into(),
+            gpu_written: false.into(),
             staging: std::sync::Mutex::new(None),
             twin: std::sync::OnceLock::new(),
             bytes,
@@ -905,6 +910,15 @@ impl HostTexture {
     pub(crate) fn used_recently(&self) -> bool {
         let frame = self.last[0].load(std::sync::atomic::Ordering::Relaxed);
         frame != NEVER && frame.saturating_add(1) >= crate::queue::presented()
+    }
+
+    /// A list moves it to `state` (a host state): a write state marks it
+    /// written by the GPU, never to be given up.
+    pub(crate) fn note_state(&self, state: u32) {
+        const RENDER_TARGET_UNORDERED_DEPTH_WRITE: u32 = 0x4 | 0x8 | 0x10;
+        if state & RENDER_TARGET_UNORDERED_DEPTH_WRITE != 0 {
+            self.gpu_written.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// A list uses it: counted the first time (diagnostics of how much of
@@ -1602,12 +1616,16 @@ fn remade(k: &MemoryKey) {
     }
 }
 
-/// Whether host texture `t` may be given up: its contents come from title
-/// memory alone (no render target, depth or unordered access, no host copy
-/// or resolve wrote it), so a texture made again has them back.
+/// Whether host texture `t` may be given up: nothing on the host wrote it
+/// (no list moved it to a write state, no heap slot views it for unordered
+/// access, no host copy or resolve), so a texture made again has its
+/// contents back: title memory's, or none for one with GPU uses that
+/// nothing wrote yet (#135: 2 GB of those, viewed by heap slots alone,
+/// filled an 8 GB Mac).
 #[cfg(windows)]
 fn evictable(t: &HostTexture) -> bool {
-    t.key.is_some() && crate::texture::title_written(&t.texture) && !t.host_written.load(std::sync::atomic::Ordering::Relaxed)
+    use std::sync::atomic::Ordering::Relaxed;
+    t.key.is_some() && !t.host_written.load(Relaxed) && !t.gpu_written.load(Relaxed)
 }
 
 /// Once per presented frame, before a submission (`Host::execute`, one at a
@@ -2432,13 +2450,14 @@ mod tests {
         assert_eq!(slot::<Release>(h, 0x10)(h), 0);
     }
 
-    /// Host textures the GPU writes (render target, depth, unordered access)
-    /// are never given up, and the title releasing its texture frees its
-    /// host texture (nothing else holds it); one fed from title memory is
-    /// given up and made again on its next use.
+    /// Host textures the GPU wrote (a list moved them to a write state) are
+    /// never given up, and the title releasing its texture frees its host
+    /// texture (nothing else holds it); one fed from title memory, or one
+    /// with GPU uses that nothing wrote yet, is given up and made again on
+    /// its next use.
     #[cfg(windows)]
     #[test]
-    fn only_textures_fed_from_title_memory_are_given_up() {
+    fn only_textures_the_gpu_did_not_write_are_given_up() {
         if crate::host::host().is_none() {
             return; // no host GPU here
         }
@@ -2451,10 +2470,17 @@ mod tests {
         };
         let read = place(0, &texture(64, 64, 28, 1));
         let target = place(1 << 18, &ResourceDesc { flags: 1, ..texture(64, 64, 28, 1) });
+        let unwritten = place(1 << 19, &ResourceDesc { flags: 1, ..texture(64, 64, 28, 1) });
         let (r, t) = (host_copy(read).unwrap(), host_copy(target).unwrap());
+        assert!(owned(target).is_some(), "a render target nothing wrote yet");
+        t.note_state(0x4);
         let listed = candidates();
         assert!(listed.iter().any(|(c, _)| std::sync::Arc::ptr_eq(c, &r)), "fed from title memory");
-        assert!(!listed.iter().any(|(c, _)| std::sync::Arc::ptr_eq(c, &t)), "the GPU writes it");
+        assert!(!listed.iter().any(|(c, _)| std::sync::Arc::ptr_eq(c, &t)), "the GPU wrote it");
+        assert!(host_copy(unwritten).is_some());
+        assert!(give_up_now(unwritten), "nothing wrote it");
+        assert!(made(resource(unwritten)).is_none(), "given up");
+        assert_eq!(slot::<Release>(unwritten, 0x10)(unwritten), 0);
         let (weak_r, weak_t) = (std::sync::Arc::downgrade(&r), std::sync::Arc::downgrade(&t));
         drop((listed, r, t));
         let (r, t) = (weak_r, weak_t);

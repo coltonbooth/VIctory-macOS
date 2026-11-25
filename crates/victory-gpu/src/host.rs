@@ -1924,6 +1924,8 @@ impl HostList {
         // give it up meanwhile; this list then holds it).
         let copy = crate::resource::host_copy(resource)?;
         let texture = copy.texture.clone();
+        // Unordered access through the twin skips `track` below.
+        copy.note_state(wanted);
         if let Some(Some(twin)) = copy.twin.get()
             && crate::twin::route(self, &copy, twin, wanted)
         {
@@ -1937,6 +1939,7 @@ impl HostList {
     /// one): the state it leaves, if that is a change. Nothing for the
     /// list's first use (its prelude moves the texture there).
     fn track(&self, copy: &std::sync::Arc<crate::resource::HostTexture>, wanted: u32) -> Option<u32> {
+        copy.note_state(wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         match states.entry(std::sync::Arc::as_ptr(copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
