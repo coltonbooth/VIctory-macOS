@@ -60,7 +60,8 @@ pub fn run(
     let prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
     let title_dir = exe.parent().unwrap_or(Path::new("."));
-    match victory_game::identify(&hash) {
+    let known = victory_game::identify(&hash);
+    match known {
         Some(build) => {
             println!("build          {} ({hash})", build.label);
             if execute {
@@ -95,6 +96,27 @@ pub fn run(
         "clwb loops     {} made NOPs",
         victory_loader::nop_clwb_loops(image.base() as u64, image.info())
     );
+    // The title's hang watchdog off, for world loads from slow storage.
+    #[cfg(windows)]
+    if std::env::var_os("VICTORY_NO_HANG_WATCHDOG").is_some_and(|v| v != "0") {
+        match known.map(|b| b.hang_watchdog).filter(|p| !p.is_empty()) {
+            Some(patches) => {
+                for p in patches {
+                    if victory_loader::patch_code(
+                        image.base() as u64,
+                        p.rva,
+                        p.original,
+                        p.replacement,
+                    ) {
+                        println!("hang watchdog  off at +{:#x}", p.rva);
+                    } else {
+                        println!("hang watchdog  left on: unexpected bytes at +{:#x}", p.rva);
+                    }
+                }
+            }
+            None => println!("hang watchdog  left on: unknown build"),
+        }
+    }
     // Masked stores redone as plain stores Rosetta can resume, so fault
     // tracking (`VICTORY_FAULT_TRACKING=1`) can run under Rosetta (#50).
     if let (Some(which), Some(original)) = (patching, original) {

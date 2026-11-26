@@ -1216,6 +1216,11 @@ impl Host {
         // Host textures the title has not used for a while (or past the
         // card's budget) are given up first: the last submission has run.
         crate::resource::evict_unused();
+        // The first shader writing through a heap may run in this
+        // submission: unordered views left null are made again first.
+        if crate::bindless::take_remake() {
+            crate::descriptor::remake_unordered();
+        }
         // Descriptors the title copied into its heaps itself, before the
         // heaps' views are brought up to date below.
         #[cfg(feature = "diagnostics")]

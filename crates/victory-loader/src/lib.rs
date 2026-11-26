@@ -24,6 +24,8 @@
 #[cfg(windows)]
 mod crash;
 pub mod masked;
+#[cfg(windows)]
+mod patch;
 pub mod prepare;
 pub(crate) mod publish;
 pub mod resolve;
@@ -45,6 +47,8 @@ pub use crash::{
     locate, log_crash, log_crashes_to, nop_clwb_loops, note_title_output, report_crashes,
     report_unhandled,
 };
+#[cfg(windows)]
+pub use patch::patch_code;
 pub use prepare::{PrepareError, PreparedImage, prepare};
 pub use resolve::{ImportResolver, Provenance, Resolution};
 #[cfg(all(windows, feature = "diagnostics"))]

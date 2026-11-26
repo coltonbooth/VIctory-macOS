@@ -825,6 +825,9 @@ pub(crate) struct HostTexture {
     /// unordered access): its flags alone do not say so, since a memory's
     /// host texture takes the uses of every title texture there.
     gpu_written: std::sync::atomic::AtomicBool,
+    /// A heap slot views it for unordered access (`VICTORY_EVICT_HEAP_UAV`):
+    /// written by the GPU once shaders write through heaps.
+    heap_writable: std::sync::atomic::AtomicBool,
     /// Its uploads from title memory (`crate::texture`), made on first use.
     pub(crate) staging: std::sync::Mutex<Option<std::sync::Arc<crate::texture::Staging>>>,
     /// A depth texture's writable twin (`crate::twin`), made with its first
@@ -866,6 +869,7 @@ impl HostTexture {
             castable,
             host_written: false.into(),
             gpu_written: false.into(),
+            heap_writable: false.into(),
             staging: std::sync::Mutex::new(None),
             twin: std::sync::OnceLock::new(),
             bytes,
@@ -919,6 +923,11 @@ impl HostTexture {
         if state & RENDER_TARGET_UNORDERED_DEPTH_WRITE != 0 {
             self.gpu_written.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// A heap slot views it for unordered access.
+    pub(crate) fn note_heap_writable(&self) {
+        self.heap_writable.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// A list uses it: counted the first time (diagnostics of how much of
@@ -1625,7 +1634,19 @@ fn remade(k: &MemoryKey) {
 #[cfg(windows)]
 fn evictable(t: &HostTexture) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
-    t.key.is_some() && !t.host_written.load(Relaxed) && !t.gpu_written.load(Relaxed)
+    t.key.is_some()
+        && !t.host_written.load(Relaxed)
+        && !t.gpu_written.load(Relaxed)
+        && !(t.heap_writable.load(Relaxed) && crate::bindless::heap_written())
+}
+
+/// `VICTORY_EVICT_HEAP_UAV=1`: textures viewed for unordered access in
+/// shader-visible heaps may be given up until a shader writes through a
+/// heap (#135: ~1.5 GB on an 8 GB Mac, where none did); their null slots
+/// are made again before that write reaches the GPU.
+pub(crate) fn evict_heap_uav() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_EVICT_HEAP_UAV").is_some_and(|v| v != "0"))
 }
 
 /// Once per presented frame, before a submission (`Host::execute`, one at a

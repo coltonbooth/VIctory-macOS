@@ -10,7 +10,7 @@
 //! `crate::watch`).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
 use crate::descriptor::View;
@@ -334,7 +334,28 @@ pub(crate) fn note_draw(writes: bool) {
     HEAP_DRAWS[0].fetch_add(1, Relaxed);
     if writes {
         HEAP_DRAWS[1].fetch_add(1, Relaxed);
+        if !HEAP_WRITTEN.swap(true, Relaxed) {
+            REMAKE.store(true, Relaxed);
+        }
     }
+}
+
+/// A shader wrote through a heap's views (ever): textures viewed for
+/// unordered access there may hold what the GPU wrote, which no state move
+/// shows (`crate::resource::evictable`).
+static HEAP_WRITTEN: AtomicBool = AtomicBool::new(false);
+/// The unordered views left null are to be made again before the next
+/// submission ([`take_remake`]).
+static REMAKE: AtomicBool = AtomicBool::new(false);
+
+/// Whether any shader wrote through a heap yet.
+pub(crate) fn heap_written() -> bool {
+    HEAP_WRITTEN.load(Relaxed)
+}
+
+/// Whether the null unordered views are to be made again now (once).
+pub(crate) fn take_remake() -> bool {
+    REMAKE.swap(false, Relaxed)
 }
 
 /// Every view heap's registry.

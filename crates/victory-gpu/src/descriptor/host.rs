@@ -34,6 +34,10 @@ pub(crate) struct HostHeap {
     /// the title views through a fraction of the slots, and a dense table
     /// of them all was 37.7 MB, written when the heap was made.
     kept: Mutex<Paged<Held>>,
+    /// Unordered views of textures left null by [`HostHeap::evict`]
+    /// (`VICTORY_EVICT_HEAP_UAV`), made again by
+    /// [`HostHeap::remake_unordered`] once shaders write through heaps.
+    nulled_unordered: Mutex<Vec<u32>>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -208,6 +212,7 @@ impl HostHeap {
             sampler,
             made: Mutex::new(vec![0; count as usize]),
             kept: Mutex::new(Paged::new((count + extra) as usize)),
+            nulled_unordered: Mutex::new(Vec::new()),
             next: Mutex::new((0, vec![false; extra as usize])),
             pairs: Mutex::new((count + extra, Vec::new())),
             pairs_end: match victory_shader::emit::NULL_BUFFER_VIEW {
@@ -714,9 +719,12 @@ impl HostHeap {
         // A placed texture's view left null below is made when a draw reads
         // the slot through a table; until then the slot is not made again
         // (heap syncs revisit it at every submission).
+        // A texture's unordered view left null when the texture was given
+        // up (`VICTORY_EVICT_HEAP_UAV`) is made again for a draw like a
+        // texture's shader view: a table copying the null slot loses writes.
         let lazy = || {
             for_draw
-                && is_texture(&view)
+                && (is_texture(&view) || is_unordered_texture(&view))
                 && self.kept.lock().unwrap_or_else(|e| e.into_inner()).get(index as usize).is_none()
         };
         if made[index as usize] == key && !lazy() {
@@ -824,8 +832,23 @@ impl HostHeap {
             if index < self.count {
                 self.viewed.set(index, view.as_ref(), false);
                 crate::shadow::forget_read(index);
+                if view.as_ref().is_some_and(is_unordered_texture) {
+                    self.nulled_unordered.lock().unwrap_or_else(|e| e.into_inner()).push(index);
+                }
             }
         }
+    }
+
+    /// Makes again the unordered texture views [`HostHeap::evict`] left
+    /// null, the title's heap starting at `start` with `step` bytes a slot:
+    /// shaders indexing the heap may write through them now.
+    pub(crate) fn remake_unordered(&self, start: u64, step: u64) -> usize {
+        let slots = std::mem::take(&mut *self.nulled_unordered.lock().unwrap_or_else(|e| e.into_inner()));
+        for &index in &slots {
+            self.made.lock().unwrap_or_else(|e| e.into_inner())[index as usize] = 0;
+            self.mirror(index, start + u64::from(index) * step, true);
+        }
+        slots.len()
     }
 
     /// The host textures (raw pointers) slots `slots` view.
@@ -1456,9 +1479,14 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             };
             copy.viewed.store(true, std::sync::atomic::Ordering::Relaxed);
             // Shaders indexing the heap write through this view without
-            // moving the texture to a write state, and a slot left null is
-            // made again only when read: kept from now on.
-            copy.note_state(0x8);
+            // moving the texture to a write state: kept from now on, unless
+            // `VICTORY_EVICT_HEAP_UAV` lets it go until shaders write
+            // through heaps (`crate::resource::evictable`).
+            if crate::resource::evict_heap_uav() {
+                copy.note_heap_writable();
+            } else {
+                copy.note_state(0x8);
+            }
             let texture = &copy.texture;
             // A depth texture's unordered views write its twin.
             // SAFETY: a live resource.
@@ -1527,6 +1555,11 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             }
         }
     }
+}
+
+/// Whether `view` is an unordered view of a resource object's texture.
+fn is_unordered_texture(view: &View) -> bool {
+    matches!(view, View::Unordered(r, _, _) if crate::resource::texture_memory(*r as crate::object::This).is_some())
 }
 
 /// Whether `view` is a view of a texture the title placed in memory itself.

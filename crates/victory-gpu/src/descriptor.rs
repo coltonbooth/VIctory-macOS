@@ -251,6 +251,23 @@ pub(crate) fn make_read(slots: &[u32]) {
     }
 }
 
+/// Makes again, in every shader-visible view heap, the unordered texture
+/// views left null when their textures were given up
+/// (`VICTORY_EVICT_HEAP_UAV`): from now on shaders write through heaps.
+#[cfg(windows)]
+pub(crate) fn remake_unordered() {
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut made = 0;
+    for &(start, _, at) in heaps.iter() {
+        // SAFETY: registered heaps are live (removed when dropped).
+        let heap = unsafe { &*(at as *const Heap) };
+        if let (Some(Some(host)), Some(step), VIEWS_KIND) = (heap.host.get(), increment(heap.desc.kind), heap.desc.kind) {
+            made += host.remake_unordered(start, u64::from(step));
+        }
+    }
+    tracing::info!(made, "shaders write through heaps: unordered texture views made again");
+}
+
 /// The host textures (raw pointers) that slots `slots` of the
 /// shader-visible view heaps view.
 #[cfg(windows)]
