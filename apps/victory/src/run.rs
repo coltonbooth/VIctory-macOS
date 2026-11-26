@@ -73,9 +73,24 @@ pub fn run(
     // Rosetta cannot resume these when they fault partway (#14, #50).
     let masked = victory_loader::masked::masked_stores(&prepared.info, &original);
     println!("masked stores  {}", victory_loader::masked::summary(&masked));
+    // Under Rosetta, tracking is off unless asked for, and the stores it
+    // cannot resume are patched when it is on (`victory_gpu::fault_tracking`).
+    println!(
+        "fault tracking {}",
+        if victory_gpu::fault_tracking() {
+            "on"
+        } else if victory_gpu::rosetta() {
+            "off (title memory copied whole; VICTORY_FAULT_TRACKING=1 turns it on, which also patches the stores Rosetta cannot resume)"
+        } else {
+            "off (title memory copied whole)"
+        }
+    );
     // The file's bytes (the exe's size, 114 MB) are kept only to patch the
     // masked stores after the mapping.
-    let patching = std::env::var("VICTORY_PATCH_MASKED").ok();
+    let patching = victory_loader::masked::choice(
+        std::env::var("VICTORY_PATCH_MASKED").ok(),
+        victory_gpu::stores_need_patching(),
+    );
     let original = patching.is_some().then_some(original);
 
     let images = cfg.cache_subdir("images")?;
@@ -91,11 +106,21 @@ pub fn run(
         image.info().image_base
     );
     // clwb faults under Rosetta, an exception per write-back loop (#135).
+    // Only there, the same check fault tracking uses; `VICTORY_NOP_CLWB=0`
+    // turns it off and `1` turns it on elsewhere.
     #[cfg(windows)]
-    println!(
-        "clwb loops     {} made NOPs",
-        victory_loader::nop_clwb_loops(image.base() as u64, image.info())
-    );
+    if match std::env::var("VICTORY_NOP_CLWB").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => victory_gpu::rosetta(),
+    } {
+        println!(
+            "clwb loops     {} made NOPs",
+            victory_loader::nop_clwb_loops(image.base() as u64, image.info())
+        );
+    } else {
+        println!("clwb loops     left as they are");
+    }
     // The title's hang watchdog off, for world loads from slow storage.
     #[cfg(windows)]
     if std::env::var_os("VICTORY_NO_HANG_WATCHDOG").is_some_and(|v| v != "0") {
@@ -121,7 +146,8 @@ pub fn run(
     // tracking (`VICTORY_FAULT_TRACKING=1`) can run under Rosetta (#50).
     if let (Some(which), Some(original)) = (patching, original) {
         let wanted = victory_loader::masked::wanted_from(Some(&which));
-        let n = victory_loader::masked::patch(image.base() as u64, image.info(), &original, wanted);
+        let n =
+            victory_loader::masked::patch(image.base() as u64, image.info(), &original, &wanted);
         println!("masked stores  {n} patched to plain stores");
     }
     let resolver = HleResolver::new(if strict {

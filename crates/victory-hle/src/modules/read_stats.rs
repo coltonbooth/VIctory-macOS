@@ -76,7 +76,7 @@ fn report() {
                 .map(|(k, v)| (k.clone(), *v))
                 .collect()
         };
-        rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.1));
         let total: u64 = rows.iter().map(|r| r.1.1).sum();
         tracing::info!(
             files = rows.len(),
