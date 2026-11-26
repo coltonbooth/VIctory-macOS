@@ -90,11 +90,21 @@ pub fn run(
         image.info().image_base
     );
     // clwb faults under Rosetta, an exception per write-back loop (#135).
+    // Only there, the same check fault tracking uses; `VICTORY_NOP_CLWB=0`
+    // turns it off and `1` turns it on elsewhere.
     #[cfg(windows)]
-    println!(
-        "clwb loops     {} made NOPs",
-        victory_loader::nop_clwb_loops(image.base() as u64, image.info())
-    );
+    if match std::env::var("VICTORY_NOP_CLWB").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => victory_gpu::rosetta(),
+    } {
+        println!(
+            "clwb loops     {} made NOPs",
+            victory_loader::nop_clwb_loops(image.base() as u64, image.info())
+        );
+    } else {
+        println!("clwb loops     left as they are");
+    }
     // Masked stores redone as plain stores Rosetta can resume, so fault
     // tracking (`VICTORY_FAULT_TRACKING=1`) can run under Rosetta (#50).
     if let (Some(which), Some(original)) = (patching, original) {

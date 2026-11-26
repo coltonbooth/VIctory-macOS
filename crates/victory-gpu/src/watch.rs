@@ -73,7 +73,7 @@ fn decide(var: Option<&str>, default: bool) -> bool {
 
 /// Whether x86-64 code here runs under Rosetta: Wine on macOS, whose
 /// x86-64 Wine only runs that way on the Apple silicon Macs D3DMetal needs.
-fn rosetta() -> bool {
+pub fn rosetta() -> bool {
     use std::ffi::{CStr, c_char};
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     type HostVersion = unsafe extern "C" fn(*mut *const c_char, *mut *const c_char);

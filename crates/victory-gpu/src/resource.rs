@@ -823,7 +823,9 @@ pub(crate) struct HostTexture {
     pub(crate) host_written: std::sync::atomic::AtomicBool,
     /// A list moved it to a GPU write state (render target, depth write,
     /// unordered access): its flags alone do not say so, since a memory's
-    /// host texture takes the uses of every title texture there.
+    /// host texture takes the uses of every title texture there. Never
+    /// cleared: a texture the GPU wrote once is never given up, even if the
+    /// title later overwrites it from memory.
     gpu_written: std::sync::atomic::AtomicBool,
     /// Its uploads from title memory (`crate::texture`), made on first use.
     pub(crate) staging: std::sync::Mutex<Option<std::sync::Arc<crate::texture::Staging>>>,

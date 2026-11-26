@@ -181,3 +181,6 @@ After its second end, a queue ignores everything submitted to it, presents inclu
 
 So every submission now ends with a small list that copies the submission's number into read-back memory (`Mark` in `victory-gpu/src/host.rs`). `WriteBufferImmediate` writes nothing under D3DMetal, so it is a copy. When a submission did not run as far as its mark, it was ended, and what it drew is missing. VIctory logs that, then submits the mark alone. If that does not run either, a new queue replaces the old one, and the next present makes its swap chain on it. If the new queue does not run work either, the run ends with a host GPU failure. `work_goes_on_after_macos_stops_the_queue` (ignored, run under Wine on a Mac) shows the whole sequence. Two draws of about 4 s were ended, the second left its queue ignoring work, and a draw on the new queue ran whole.
 
+## The clwb write-back loops
+
+The title has eight loops that write cache lines back with `clwb`, which faults under Rosetta and costs an exception each time (#135). Under Rosetta, the same check that decides fault tracking, `victory` turns the `clwb` of each loop into a NOP when it loads the image. It patches only when it finds exactly eight loops and logs the number it found otherwise. `VICTORY_NOP_CLWB=0` leaves the loops alone and `VICTORY_NOP_CLWB=1` patches them where Rosetta is not detected.
